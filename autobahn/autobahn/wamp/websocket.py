@@ -84,7 +84,7 @@ class WampWebSocketProtocol:
       Callback from :func:`autobahn.websocket.interfaces.IWebSocketChannel.onMessage`
       """
       try:
-         msg = self._serializer.unserialize(payload, isBinary)
+         msg = self._serializer.unserialize(str(payload), isBinary)
          if self.factory.debug_wamp:
             print("RX {}".format(msg))
          self._session.onMessage(msg)

@@ -28,11 +28,21 @@ from twisted.web.server import NOT_DONE_YET
 
 from autobahn.util import newid
 
-from protocol import WampProtocol, parseSubprotocolIdentifier
+from protocol import ApplicationSession, RouterSession, parseSubprotocolIdentifier
+from websocket import WampWebSocketProtocol
+from serializer import JsonSerializer
 
+class _CorsResource(object):
 
+    def render_OPTIONS(self, request):
+      request.setResponseCode(200)
+      request.setHeader('Access-Control-Allow-Origin', request.getRequestHostname())
+      request.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+      #request.setHeader('Access-Control-Max-Age',1728000)
+      request.setHeader('Access-Control-Allow-Headers', 'content-type')
+      return ""
 
-class WampHttpResourceSessionSend(Resource):
+class WampHttpResourceSessionSend(Resource, _CorsResource):
    """
    A Web resource for sending via XHR that is part of a WampHttpResourceSession.
    """
@@ -55,7 +65,7 @@ class WampHttpResourceSessionSend(Resource):
       try:
          if self._debug:
             log.msg("WAMP session data received (transport ID %s): %s" % (self._parent._transportid, payload))
-         self._parent.onMessage(payload, False)
+         self._parent.onMessage(payload, self._parent._serializer._serializer.BINARY)
       except Exception as e:
          request.setHeader('content-type', 'text/plain; charset=UTF-8')
          request.setResponseCode(http.BAD_REQUEST)
@@ -64,13 +74,17 @@ class WampHttpResourceSessionSend(Resource):
       request.setResponseCode(http.NO_CONTENT)
       self._parent._parent.setStandardHeaders(request)
       request.setHeader('content-type', 'application/json; charset=utf-8')
+      request.setHeader('Access-Control-Allow-Origin', '*')
+      request.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+      #request.setHeader('Access-Control-Max-Age',1728000)
+      request.setHeader('Access-Control-Allow-Headers', 'content-type')
 
       self._parent._isalive = True
       return ""
 
 
 
-class WampHttpResourceSessionReceive(Resource):
+class WampHttpResourceSessionReceive(Resource, _CorsResource):
    """
    A Web resource for receiving via XHR that is part of a WampHttpResourceSession.
    """
@@ -150,7 +164,7 @@ class WampHttpResourceSessionReceive(Resource):
 
 
 
-class WampHttpResourceSession(Resource, WampProtocol):
+class WampHttpResourceSession(Resource, WampWebSocketProtocol):
    """
    A Web resource representing an open WAMP session.
    """
@@ -167,9 +181,9 @@ class WampHttpResourceSession(Resource, WampProtocol):
       Resource.__init__(self)
 
       self._parent = parent
+      self.factory = parent.factory
       self._debug = self._parent._debug
       self.reactor = self._parent.reactor
-
 
       self._transportid = transportid
       self._serializer = serializer
@@ -214,7 +228,7 @@ class WampHttpResourceSession(Resource, WampProtocol):
 
 
 
-class WampHttpResourceOpen(Resource):
+class WampHttpResourceOpen(Resource, _CorsResource):
    """
    A Web resource for creating new WAMP sessions.
    """
@@ -321,7 +335,7 @@ class WampHttpResource(Resource):
       self._queueLimitMessages = queueLimitMessages
 
       if serializers is None:
-         serializers = [WampJsonSerializer()]
+         serializers = [JsonSerializer()]
 
       self._serializers = {}
       for ser in serializers:

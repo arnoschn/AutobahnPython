@@ -582,7 +582,8 @@ class WampWebSocketServerFactory(websocket.WampWebSocketServerFactory, WebSocket
 
       WebSocketServerFactory.__init__(self, *args, **kwargs)
 
-
+   def render(self,request):
+       self.protocol().onConnect(request)
 
 class WampWebSocketClientProtocol(websocket.WampWebSocketClientProtocol, WebSocketClientProtocol):
    pass

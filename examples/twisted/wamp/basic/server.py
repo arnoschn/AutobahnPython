@@ -29,10 +29,10 @@ if __name__ == '__main__':
    ##
    parser = argparse.ArgumentParser()
 
-   parser.add_argument("-d", "--debug", action = "store_true",
+   parser.add_argument("-d", "--debug", action = "store_true", default = True,
                        help = "Enable debug output.")
 
-   parser.add_argument("-c", "--component", type = str, default = None,
+   parser.add_argument("-c", "--component", type = str, default = "rpc.timeservice.backend.Component",
                        help = "Start WAMP server with this application component, e.g. 'timeservice.TimeServiceBackend', or None.")
 
    parser.add_argument("-r", "--realm", type = str, default = "realm1",
@@ -41,8 +41,11 @@ if __name__ == '__main__':
    parser.add_argument("--endpoint", type = str, default = "tcp:8080",
                        help = 'Twisted server endpoint descriptor, e.g. "tcp:8080" or "unix:/tmp/mywebsocket".')
 
-   parser.add_argument("--transport", choices = ['websocket', 'rawsocket-json', 'rawsocket-msgpack'], default = "websocket",
+   parser.add_argument("--transport", choices = ['websocket', 'rawsocket-json', 'rawsocket-msgpack', 'longpoll'], default = "websocket",
                        help = 'WAMP transport type')
+
+   parser.add_argument("-s", "--static-dir", type = str, default="/Users/arno/Documents/PycharmProjects/AutobahnJS/",
+                       help = 'static resources to be served on http, will be available under /static')
 
    args = parser.parse_args()
 
@@ -93,11 +96,32 @@ if __name__ == '__main__':
 
    if args.transport == "websocket":
 
-      ## create a WAMP-over-WebSocket transport server factory
+      ## create a WAMP-over-WebSocket transport server factory with longpoll fallback
       ##
+      from autobahn.wamp.serializer import JsonSerializer, MsgPackSerializer
       from autobahn.twisted.websocket import WampWebSocketServerFactory
-      transport_factory = WampWebSocketServerFactory(session_factory, debug_wamp = args.debug)
-      transport_factory.setProtocolOptions(failByDrop = False)
+      from autobahn.twisted.resource import WebSocketResource
+      from twisted.web.server import Site
+      from twisted.web.static import File
+      from autobahn.wamp.http import WampHttpResource
+      ws_factory = WampWebSocketServerFactory(session_factory, debug_wamp = args.debug)
+      ws_factory.setProtocolOptions(failByDrop = False)
+      serializers = [MsgPackSerializer(), JsonSerializer()]
+
+      resource = WampHttpResource(serializers, debug=True, timeout=100, killAfter=120)
+      resource.factory = ws_factory
+      root = File("longpoll")
+
+      root.putChild("ws", WebSocketResource(ws_factory))
+      root.putChild("longpoll", resource)
+      if args.static_dir:
+          #root.putChild("web", File("/Users/arno/Documents/PycharmProjects/AutobahnJS/test/"))
+          #root.putChild("autobahn.js", File("/Users/arno/Documents/PycharmProjects/AutobahnJS/build/autobahn.js"))
+          #root.putChild("lib", File("/Users/arno/Documents/PycharmProjects/AutobahnJS/package/lib/"))
+          root.putChild("static", File(args.static_dir))
+      transport_factory = Site(root)
+      transport_factory.log = lambda _: None # disable any logging
+
 
    elif args.transport in ['rawsocket-json', 'rawsocket-msgpack']:
 
@@ -118,11 +142,12 @@ if __name__ == '__main__':
    else:
       raise Exception("should not arrive here")
 
-
    ## start the server from an endpoint
    ##
    server = serverFromString(reactor, args.endpoint)
    server.listen(transport_factory)
+
+
 
 
    ## now enter the Twisted reactor loop
