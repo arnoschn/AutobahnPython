@@ -269,16 +269,7 @@ class BaseSession:
 
 ISession.register(BaseSession)
 
-def parseSubprotocolIdentifier(subprotocol):
-   try:
-      s = subprotocol.split('.')
-      if s[0] != "wamp":
-         raise Exception("invalid protocol %s" % s[0])
-      version = int(s[1])
-      serializerId = s[2]
-      return version, serializerId
-   except:
-      return None, None
+
 
 class ApplicationSession(BaseSession):
    """
@@ -446,7 +437,7 @@ class ApplicationSession(BaseSession):
                except Exception as e:
                   if self.debug_app:
                      print("Failure while firing event handler {} subscribed under '{}' ({}):".format(handler.fn, handler.topic, msg.subscription))
-                     print(err)
+                     print(e)
 
             else:
                raise ProtocolError("EVENT received for non-subscribed subscription ID {}".format(msg.subscription))
@@ -1142,7 +1133,8 @@ class RouterSession(BaseSession):
 
       self._realm = None
       self._session_id = None
-
+      self._heartbeat_id = None
+      self._incoming_heartbeat_id = None
       ## session authentication information
       ##
       self._authid = None
@@ -1248,8 +1240,10 @@ class RouterSession(BaseSession):
             raise ProtocolError("HELLO message received, while session is already established")
 
          elif isinstance(msg, message.Goodbye):
+
             if not self._goodbye_sent:
                ## the peer wants to close: send GOODBYE reply
+               wasClean = True
                reply = message.Goodbye()
                self._transport.send(reply)
 
@@ -1260,15 +1254,24 @@ class RouterSession(BaseSession):
 
             self._session_id = None
 
-            #self._transport.close()
+            self._transport.onClose(True, msg.reason, msg.message)
 
          elif isinstance(msg, message.Heartbeat):
 
             pass ## FIXME
+            if msg.incoming != self._heartbeat_id:
+               # answer heartbeat
+               self._incoming_heartbeat_id = msg.outgoing
 
+               self.sendHeartbeat()
          else:
 
             self._router.process(self, msg)
+
+   def sendHeartbeat(self):
+      self._heartbeat_id = util.id()
+      reply = message.Heartbeat(self._incoming_heartbeat_id, self._heartbeat_id)
+      self._transport.send(reply)
 
 
    def onClose(self, wasClean):

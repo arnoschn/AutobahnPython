@@ -58,9 +58,10 @@ from autobahn.websocket.xormasker import XorMaskerNull, createXorMasker
 from autobahn.websocket.compress import *
 from autobahn.websocket import http
 
-
-from six.moves import urllib
-
+try:
+    from six.moves import urllib
+except ImportError:
+    import urllib
 # ## The Python urlparse module currently does not contain the ws/wss
 # ## schemes, so we add those dynamically (which is a hack of course).
 # ##
@@ -848,7 +849,7 @@ class WebSocketProtocol:
          else:
             ## Either reply with same code/reason, or code == NORMAL/reason=None
             if self.echoCloseCodeReason:
-               self.sendCloseFrame(code = code, reasonUtf8 = reason.encode("UTF-8"), isReply = True)
+               self.sendCloseFrame(code = code, reasonUtf8 = reasonRaw.encode("UTF-8"), isReply = True)
             else:
                self.sendCloseFrame(code = WebSocketProtocol.CLOSE_STATUS_CODE_NORMAL, isReply = True)
 

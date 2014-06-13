@@ -60,3 +60,4 @@ def error(uri):
       cls._wampuris.append(Pattern(six.u(uri), Pattern.URI_TARGET_EXCEPTION))
       return cls
    return decorate
+

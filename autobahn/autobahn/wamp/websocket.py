@@ -71,11 +71,15 @@ class WampWebSocketProtocol:
       try:
          if self.factory.debug_wamp:
             print("WAMP-over-WebSocket transport lost: wasClean = {}, code = {}, reason = '{}'".format(wasClean, code, reason))
-         self._session.onClose(wasClean)
+         if hasattr(self,"_session"):
+            self._session.onClose(wasClean)
+
       except Exception as e:
          ## silently ignore exceptions raised here ..
          if self.factory.debug_wamp:
             traceback.print_exc()
+      #finally:
+         #self._bailout(protocol.WebSocketProtocol.CLOSE_STATUS_CODE_NORMAL if wasClean else protocol.WebSocketProtocol.CLOSE_STATUS_CODE_GOING_AWAY, reason = reason)
       self._session = None
 
 
@@ -84,7 +88,7 @@ class WampWebSocketProtocol:
       Callback from :func:`autobahn.websocket.interfaces.IWebSocketChannel.onMessage`
       """
       try:
-         msg = self._serializer.unserialize(str(payload), isBinary)
+         msg = self._serializer.unserialize(payload, isBinary)
          if self.factory.debug_wamp:
             print("RX {}".format(msg))
          self._session.onMessage(msg)

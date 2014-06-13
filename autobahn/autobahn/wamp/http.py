@@ -28,26 +28,113 @@ from twisted.web.server import NOT_DONE_YET
 
 from autobahn.util import newid
 
-from protocol import ApplicationSession, RouterSession, parseSubprotocolIdentifier
-from websocket import WampWebSocketProtocol
+
+from websocket import WampWebSocketProtocol, parseSubprotocolIdentifier, WampWebSocketServerProtocol
 from serializer import JsonSerializer
 
-class _CorsResource(object):
+from autobahn.websocket.protocol import WebSocketProtocol
+import traceback
+import message
+from autobahn.wamp.exception import TransportLost
+from twisted.web.server import Site
+from twisted.web.static import File
+from autobahn.twisted.resource import WebSocketResource
+from autobahn.twisted.websocket import WampWebSocketServerFactory
 
-    def render_OPTIONS(self, request):
-      request.setResponseCode(200)
-      request.setHeader('Access-Control-Allow-Origin', request.getRequestHostname())
-      request.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-      #request.setHeader('Access-Control-Max-Age',1728000)
-      request.setHeader('Access-Control-Allow-Headers', 'content-type')
+class WampHttpWebsocketServerFactory(Site, WampWebSocketServerFactory):
+
+   def __init__(self, factory,
+                serializers = None,
+                timeout = 10,
+                killAfter = 30,
+                queueLimitBytes = 128 * 1024,
+                queueLimitMessages = 100,
+                debug = False,
+                reactor = None,
+                allowed_origins = "*"):
+
+      self._ws_factory = WampWebSocketServerFactory(factory, debug_wamp = debug, serializers = serializers)
+
+      self._root = File("longpoll")
+      self._resource = WampHttpResource(self._ws_factory, serializers, debug=debug, timeout=timeout, killAfter=killAfter,
+                                        queueLimitBytes = queueLimitBytes, queueLimitMessages = queueLimitMessages,
+                                        reactor = reactor, allowed_origins=allowed_origins)
+      self._root.putChild("ws", WebSocketResource(self._ws_factory))
+      self._root.putChild("longpoll", self._resource)
+      Site.__init__(self,self._root)
+
+   def setProtocol(self, protocol):
+      self._ws_factory.protocol = protocol
+
+   def setProtocolOptions(self, **kwargs):
+
+      self._ws_factory.setProtocolOptions(**kwargs)
+   def log(self, *args, **kwargs):
+      pass
+
+class WampHttpSecurity:
+
+   def _restrictToIp(self, request, transportid=None, parent=None):
+      allowed_ip = None
+      if transportid is None:
+         transportid = self._parent._transportid
+      if parent is None:
+         parent = self._parent._parent
+      if transportid in parent._ips:
+         allowed_ip = parent._ips[transportid]
+
+      if allowed_ip != request.client.host:
+
+         request.setHeader('content-type', 'text/plain; charset=UTF-8')
+         request.setResponseCode(http.BAD_GATEWAY)
+
+         raise Exception("ip not allowed to access transport")
+
+   def _revokeIpAccess(self,request,transport):
+      if not hasattr(self._parent,"_ips"):
+         self._parent._ips = {}
+      if transport in self._parent._ips:
+         del self._parent._ips[transport]
+
+   def _grantIpAccess(self,request,transport):
+      if not hasattr(self._parent,"_ips"):
+         self._parent._ips = {}
+      self._parent._ips[transport] = request.client.host
+class WampHttpResourceCors:
+
+
+   def setCorsHeaders(self, request):
+      """
+      Set standard HTTP response headers.
+      """
+      origin = request.getHeader("Origin")
+      if origin is None or origin == "null":
+         origin = "*"
+      allowed_origin = self._allowed_origins
+
+      if not type(allowed_origin) is list:
+         allowed_origin = [allowed_origin]
+
+
+
+      request.setHeader('access-control-allow-origin', ", ".join(allowed_origin))
+      request.setHeader('access-control-allow-credentials', 'true')
+      request.setHeader('access-control-allow-methods', 'POST, OPTIONS')
+      request.setHeader('Access-Control-Request-Method', 'POST')
+      request.setHeader('Access-Control-Max-Age', 1728000)
+
+      headers = request.getHeader('Access-Control-Request-Headers')
+      if headers is not None:
+         request.setHeader('Access-Control-Allow-Headers', headers)
+   def render_OPTIONS(self, request):
+      self.setCorsHeaders(request)
       return ""
-
-class WampHttpResourceSessionSend(Resource, _CorsResource):
+class WampHttpResourceSessionSend(Resource, WampHttpSecurity, WampHttpResourceCors):
    """
    A Web resource for sending via XHR that is part of a WampHttpResourceSession.
    """
 
-   def __init__(self, parent):
+   def __init__(self, parent, allowed_origins):
       """
       """
       Resource.__init__(self)
@@ -55,17 +142,22 @@ class WampHttpResourceSessionSend(Resource, _CorsResource):
       self._parent = parent
       self._debug = self._parent._parent._debug
       self.reactor = self._parent.reactor
+      self._allowed_origins = allowed_origins
 
 
    def render_POST(self, request):
       """
       WAMP message send.
       """
+
+      self._restrictToIp(request)
       payload = request.content.read()
       try:
          if self._debug:
             log.msg("WAMP session data received (transport ID %s): %s" % (self._parent._transportid, payload))
-         self._parent.onMessage(payload, self._parent._serializer._serializer.BINARY)
+         self._parent.onMessage(payload, False)
+      except TransportLost as tl:
+          raise tl
       except Exception as e:
          request.setHeader('content-type', 'text/plain; charset=UTF-8')
          request.setResponseCode(http.BAD_REQUEST)
@@ -73,28 +165,26 @@ class WampHttpResourceSessionSend(Resource, _CorsResource):
 
       request.setResponseCode(http.NO_CONTENT)
       self._parent._parent.setStandardHeaders(request)
+      self.setCorsHeaders(request)
       request.setHeader('content-type', 'application/json; charset=utf-8')
-      request.setHeader('Access-Control-Allow-Origin', '*')
-      request.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-      #request.setHeader('Access-Control-Max-Age',1728000)
-      request.setHeader('Access-Control-Allow-Headers', 'content-type')
 
       self._parent._isalive = True
       return ""
 
 
 
-class WampHttpResourceSessionReceive(Resource, _CorsResource):
+class WampHttpResourceSessionReceive(Resource, WampHttpSecurity, WampHttpResourceCors):
    """
    A Web resource for receiving via XHR that is part of a WampHttpResourceSession.
    """
 
-   def __init__(self, parent):
+   def __init__(self, parent, allowed_origins):
       """
       """
       Resource.__init__(self)
 
       self._parent = parent
+      self._allowed_origins = allowed_origins
       self._debug = self._parent._parent._debug
       self.reactor = self._parent._parent.reactor
 
@@ -141,11 +231,17 @@ class WampHttpResourceSessionReceive(Resource, _CorsResource):
 
          self._request.finish()
          self._request = None
+         return True
+      #else:
+      #   self._request.setResponseCode(http.REQUEST_TIMEOUT)
+
+      return False
 
 
    def render_POST(self, request):
-
+      self._restrictToIp(request)
       self._parent._parent.setStandardHeaders(request)
+      self.setCorsHeaders(request)
       request.setHeader('content-type', 'application/json; charset=utf-8')
 
       self._request = request
@@ -153,6 +249,7 @@ class WampHttpResourceSessionReceive(Resource, _CorsResource):
       def cancel(err):
          if self._debug:
             log.msg("WAMP session XHR poll request gone (transport ID %s" % self._parent._transportid)
+         self._request.setResponseCode(http.REQUEST_TIMEOUT)
          self._request = None
 
       request.notifyFinish().addErrback(cancel)
@@ -160,16 +257,17 @@ class WampHttpResourceSessionReceive(Resource, _CorsResource):
       self._parent._isalive = True
       self._trigger()
 
+
       return NOT_DONE_YET
 
 
 
-class WampHttpResourceSession(Resource, WampWebSocketProtocol):
+class WampHttpResourceSession(Resource, WampWebSocketProtocol, WebSocketProtocol):
    """
    A Web resource representing an open WAMP session.
    """
 
-   def __init__(self, parent, transportid, serializer):
+   def __init__(self, parent, transportid, serializer, allowed_origins):
       """
       Create a new Web resource representing a WAMP session.
 
@@ -179,18 +277,16 @@ class WampHttpResourceSession(Resource, WampWebSocketProtocol):
       :type serializer: An instance of WampSerializer.
       """
       Resource.__init__(self)
-
       self._parent = parent
-      self.factory = parent.factory
-      self._debug = self._parent._debug
+      self.factory = self._parent.factory
+      self._debug = self.debugCodePaths = self._parent._debug
+      self.failByDrop = False
       self.reactor = self._parent.reactor
-
+      self._authenticated = None
       self._transportid = transportid
       self._serializer = serializer
-
-      self._send = WampHttpResourceSessionSend(self)
-      self._receive = WampHttpResourceSessionReceive(self)
-
+      self._send = WampHttpResourceSessionSend(self, allowed_origins)
+      self._receive = WampHttpResourceSessionReceive(self, allowed_origins)
       self.putChild("send", self._send)
       self.putChild("receive", self._receive)
 
@@ -203,13 +299,18 @@ class WampHttpResourceSession(Resource, WampWebSocketProtocol):
             if self._debug:
                log.msg("killing inactive WAMP session (transport ID %s)" % self._transportid)
 
-            self.onClose(False, 5000, "Session inactive")
-            self._receive._kill()
-            del self._parent._transports[self._transportid]
+            if self._session and self._session._session_id:
+               self._session.leave(u"wamp.close.timeout", unicode("Session inactive"))
+            else:
+               self.failConnection(5000, "Session inactive")
+            #self.onClose(False, 5000, "Session inactive")
+            #self._receive._kill()
+            #del self._parent._transports[self._transportid]
+
          else:
             if self._debug:
                log.msg("WAMP session still alive (transport ID %s)" % self._transportid)
-
+            #self.sendHeartbeat()
             self._isalive = False
             self.reactor.callLater(killAfter, killIfDead)
 
@@ -220,26 +321,86 @@ class WampHttpResourceSession(Resource, WampWebSocketProtocol):
 
       self.onOpen()
 
+   def sendHeartbeat(self):
+      self._session.sendHeartbeat()
+   def onClose(self,  wasClean, code, reason):
+      WampWebSocketProtocol.onClose(self, wasClean, code, reason)
+      self._receive._kill()
+      del self._parent._transports[self._transportid]
 
    def sendMessage(self, bytes, isBinary):
       if self._debug:
          log.msg("WAMP session send bytes (transport ID %s): %s" % (self._transportid, bytes))
       self._receive.queue(bytes)
 
+   def failConnection(self, code = WebSocketProtocol.CLOSE_STATUS_CODE_GOING_AWAY, reason = "Going Away"):
+       if self._session:
+           if self._session._session_id is None:
+
+              msg = message.Abort(reason = unicode(reason), message = unicode(reason))
+              self.send(msg)
+              del self._parent._transports[self._transportid]
+           else:
+              self._session._closing_down = True
+              msg = message.Goodbye(reason = unicode(reason), message = unicode(reason))
+              self.send(msg)
+
+       else:
+          pass
 
 
-class WampHttpResourceOpen(Resource, _CorsResource):
+class WampHttpResourceClose(Resource, WampHttpSecurity, WampHttpResourceCors):
    """
    A Web resource for creating new WAMP sessions.
    """
 
-   def __init__(self, parent):
+   def __init__(self, parent, allowed_origins):
       """
       """
       Resource.__init__(self)
       self._parent = parent
       self._debug = self._parent._debug
       self.reactor = self._parent.reactor
+      self._allowed_origins = allowed_origins
+
+
+   def _failRequest(self, request, msg):
+      request.setHeader('content-type', 'text/plain; charset=UTF-8')
+      request.setResponseCode(http.BAD_REQUEST)
+      return msg
+
+
+
+   def render_POST(self, request):
+      """
+      Request to create a new WAMP session.
+      """
+      transportid=request.args["session"][0]
+      self._restrictToIp(request, transportid=transportid,parent=self._parent)
+
+      self._revokeIpAccess(request, transportid)
+
+      self._parent._transports[transportid].delEntity("send")
+      self._parent._transports[transportid].children["receive"]._kill()
+      self._parent._transports[transportid].delEntity("receive")
+      del self._parent._transports[transportid]
+      return ""
+
+
+
+class WampHttpResourceOpen(Resource, WampHttpSecurity, WampHttpResourceCors):
+   """
+   A Web resource for creating new WAMP sessions.
+   """
+
+   def __init__(self, parent, allowed_origins = None):
+      """
+      """
+      Resource.__init__(self)
+      self._parent = parent
+      self._debug = self._parent._debug
+      self.reactor = self._parent.reactor
+      self._allowed_origins = allowed_origins
 
 
    def _failRequest(self, request, msg):
@@ -253,7 +414,7 @@ class WampHttpResourceOpen(Resource, _CorsResource):
       Request to create a new WAMP session.
       """
       self._parent.setStandardHeaders(request)
-
+      self.setCorsHeaders(request)
       payload = request.content.read()
 
       try:
@@ -281,8 +442,10 @@ class WampHttpResourceOpen(Resource, _CorsResource):
 
       ## create instance of WampHttpResourceSession or subclass thereof ..
       ##
-      self._parent._transports[transportid] = self._parent.protocol(self._parent, transportid, serializer)
 
+      self._parent._transports[transportid] = self._parent.protocol(self._parent, transportid, serializer, self._allowed_origins)
+      self._grantIpAccess(request, transportid)
+      #self._parent.state = self._parent.STATE_OPEN
       ret = {'transport': transportid, 'protocol': protocol}
 
       return json.dumps(ret)
@@ -298,13 +461,15 @@ class WampHttpResource(Resource):
 
 
    def __init__(self,
+                factory,
                 serializers = None,
                 timeout = 10,
                 killAfter = 30,
                 queueLimitBytes = 128 * 1024,
                 queueLimitMessages = 100,
                 debug = False,
-                reactor = None):
+                reactor = None,
+                allowed_origins = None):
       """
       Create new HTTP WAMP Web resource.
 
@@ -325,7 +490,7 @@ class WampHttpResource(Resource):
       if reactor is None:
          from twisted.internet import reactor
       self.reactor = reactor
-
+      self.factory = factory
       Resource.__init__(self)
 
       self._debug = debug
@@ -343,10 +508,11 @@ class WampHttpResource(Resource):
 
       self._transports = {}
 
+
       ## <Base URL>/open
       ##
-      self.putChild("open", WampHttpResourceOpen(self))
-
+      self.putChild("open", WampHttpResourceOpen(self, allowed_origins))
+      self.putChild("close", WampHttpResourceClose(self, allowed_origins))
       if self._debug:
          log.msg("WampHttpResource initialized")
 
@@ -371,13 +537,6 @@ class WampHttpResource(Resource):
       """
       Set standard HTTP response headers.
       """
-      origin = request.getHeader("Origin")
-      if origin is None or origin == "null":
-         origin = "*"
-      request.setHeader('access-control-allow-origin', origin)
-      request.setHeader('access-control-allow-credentials', 'true')
       request.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
 
-      headers = request.getHeader('Access-Control-Request-Headers')
-      if headers is not None:
-         request.setHeader('Access-Control-Allow-Headers', headers)
+

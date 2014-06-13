@@ -15,7 +15,105 @@
 ##  limitations under the License.
 ##
 ###############################################################################
+from autobahn.twisted.wamp import RouterSession
+from twisted.internet.defer import Deferred
+from autobahn.twisted.websocket import WampWebSocketServerProtocol
+import Cookie
+from autobahn.util import newid, utcnow
 
+class AuthProtocol(WampWebSocketServerProtocol):
+
+   ## authid -> cookie -> set(connection)
+   _authenticated = None
+   def onConnect(self, request):
+      protocol, headers = WampWebSocketServerProtocol.onConnect(self, request)
+      if not hasattr(self.factory,"_cookies"):
+         self.factory._cookies = {}
+      ## our cookie tracking ID
+      self._cbtid = None
+
+      ## see if there already is a cookie set ..
+      if request.headers.has_key('cookie'):
+         try:
+            cookie = Cookie.SimpleCookie()
+            cookie.load(str(request.headers['cookie']))
+         except Cookie.CookieError:
+            pass
+         else:
+            if cookie.has_key('cbtid'):
+               cbtid = cookie['cbtid'].value
+               if self.factory._cookies.has_key(cbtid):
+                  self._cbtid = cbtid
+                  log.msg("Cookie already set: %s" % self._cbtid)
+
+      ## if no cookie is set, create a new one ..
+      if self._cbtid is None:
+
+         self._cbtid = newid()
+         maxAge = 86400
+
+         cbtData = {'created': utcnow(),
+                    'authenticated': None,
+                    'maxAge': maxAge,
+                    'connections': set()}
+
+         self.factory._cookies[self._cbtid] = cbtData
+
+         ## do NOT add the "secure" cookie attribute! "secure" refers to the
+         ## scheme of the Web page that triggered the WS, not WS itself!!
+         ##
+         headers['Set-Cookie'] = 'cbtid=%s;max-age=%d' % (self._cbtid, maxAge)
+         log.msg("Setting new cookie: %s" % self._cbtid)
+
+      ## add this WebSocket connection to the set of connections
+      ## associated with the same cookie
+      self.factory._cookies[self._cbtid]['connections'].add(self)
+
+      self._authenticated = self.factory._cookies[self._cbtid]['authenticated']
+
+      ## accept the WebSocket connection, speaking subprotocol `protocol`
+      ## and setting HTTP headers `headers`
+      return (protocol, headers)
+
+class MyRouterSession(RouterSession):
+
+   def onOpen(self, transport):
+
+      RouterSession.onOpen(self, transport)
+      print "transport authenticated: {}".format(self._transport._authenticated)
+
+
+   def onHello(self, realm, details):
+      print "onHello: {} {}".format(realm, details)
+      if self._transport._authenticated is not None:
+         return types.Accept(authid = self._transport._authenticated)
+      else:
+         return types.Challenge("plain")
+      return accept
+
+
+   def onLeave(self, details):
+      if details.reason == "wamp.close.logout":
+         cookie = self._transport.factory._cookies[self._transport._cbtid]
+         cookie['authenticated'] = None
+         for proto in cookie['connections']:
+            proto.sendClose()
+
+
+   def onAuthenticate(self, signature, extra):
+      print "onAuthenticate: {} {}".format(signature, extra)
+
+      dres = Deferred()
+
+      ## The client did it's Mozilla Persona authentication thing
+      ## and now wants to verify the authentication and login.
+      assertion = signature
+
+
+      log.msg("Authentication request sent.")
+
+      dres.callback(types.Accept(authid = "arno"))
+      return dres
 
 if __name__ == '__main__':
 
@@ -44,7 +142,7 @@ if __name__ == '__main__':
    parser.add_argument("--transport", choices = ['websocket', 'rawsocket-json', 'rawsocket-msgpack', 'longpoll'], default = "websocket",
                        help = 'WAMP transport type')
 
-   parser.add_argument("-s", "--static-dir", type = str, default="/Users/arno/Documents/PycharmProjects/AutobahnJS/",
+   parser.add_argument("-s", "--static-dir", type = str, default="/Users/arno/Documents/PycharmProjects/AutobahnJS-Arno/",
                        help = 'static resources to be served on http, will be available under /static')
 
    args = parser.parse_args()
@@ -74,6 +172,7 @@ if __name__ == '__main__':
    ##
    from autobahn.twisted.wamp import RouterSessionFactory
    session_factory = RouterSessionFactory(router_factory)
+   session_factory.session = RouterSession
 
 
    ## if asked to start an embedded application component ..
@@ -99,28 +198,16 @@ if __name__ == '__main__':
       ## create a WAMP-over-WebSocket transport server factory with longpoll fallback
       ##
       from autobahn.wamp.serializer import JsonSerializer, MsgPackSerializer
-      from autobahn.twisted.websocket import WampWebSocketServerFactory
-      from autobahn.twisted.resource import WebSocketResource
-      from twisted.web.server import Site
-      from twisted.web.static import File
-      from autobahn.wamp.http import WampHttpResource
-      ws_factory = WampWebSocketServerFactory(session_factory, debug_wamp = args.debug)
-      ws_factory.setProtocolOptions(failByDrop = False)
+
+      from autobahn.wamp.http import WampHttpWebsocketServerFactory
+
+
       serializers = [MsgPackSerializer(), JsonSerializer()]
 
-      resource = WampHttpResource(serializers, debug=True, timeout=100, killAfter=120)
-      resource.factory = ws_factory
-      root = File("longpoll")
-
-      root.putChild("ws", WebSocketResource(ws_factory))
-      root.putChild("longpoll", resource)
-      if args.static_dir:
-          #root.putChild("web", File("/Users/arno/Documents/PycharmProjects/AutobahnJS/test/"))
-          #root.putChild("autobahn.js", File("/Users/arno/Documents/PycharmProjects/AutobahnJS/build/autobahn.js"))
-          #root.putChild("lib", File("/Users/arno/Documents/PycharmProjects/AutobahnJS/package/lib/"))
-          root.putChild("static", File(args.static_dir))
-      transport_factory = Site(root)
-      transport_factory.log = lambda _: None # disable any logging
+      transport_factory = WampHttpWebsocketServerFactory(session_factory, serializers, debug=True, timeout=100,
+                                                         killAfter=120, allowed_origins="*")
+      #transport_factory.setProtocol(AuthProtocol)
+      transport_factory.setProtocolOptions(failByDrop = False)
 
 
    elif args.transport in ['rawsocket-json', 'rawsocket-msgpack']:
