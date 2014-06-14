@@ -293,19 +293,22 @@ class WampHttpResourceSession(Resource, WampWebSocketProtocol, WebSocketProtocol
 
       killAfter = self._parent._killAfter
       self._isalive = False
+      self._closing_down = False
 
       def killIfDead():
          if not self._isalive:
             if self._debug:
                log.msg("killing inactive WAMP session (transport ID %s)" % self._transportid)
 
-            if self._session and self._session._session_id:
+            if not self._closing_down and self._session and self._session._session_id:
                self._session.leave(u"wamp.close.timeout", unicode("Session inactive"))
+               self.reactor.callLater(killAfter, killIfDead)
+               self._closing_down = True
             else:
                self.failConnection(5000, "Session inactive")
             #self.onClose(False, 5000, "Session inactive")
-            #self._receive._kill()
-            #del self._parent._transports[self._transportid]
+               self._receive._kill()
+               del self._parent._transports[self._transportid]
 
          else:
             if self._debug:
@@ -378,13 +381,21 @@ class WampHttpResourceClose(Resource, WampHttpSecurity, WampHttpResourceCors):
       transportid=request.args["session"][0]
       self._restrictToIp(request, transportid=transportid,parent=self._parent)
 
-      self._revokeIpAccess(request, transportid)
 
-      self._parent._transports[transportid].delEntity("send")
-      self._parent._transports[transportid].children["receive"]._kill()
-      self._parent._transports[transportid].delEntity("receive")
-      del self._parent._transports[transportid]
-      return ""
+      def killMe():
+         self._revokeIpAccess(request, transportid)
+         if transportid in self._parent._transports:
+
+            self._parent._transports[transportid].delEntity("send")
+            self._parent._transports[transportid].children["receive"]._kill()
+            self._parent._transports[transportid].delEntity("receive")
+            del self._parent._transports[transportid]
+      self.reactor.callLater(10,killMe)
+      request.setResponseCode(http.OK)
+      self._parent.setStandardHeaders(request)
+      self.setCorsHeaders(request)
+      return "{}"
+
 
 
 
@@ -464,7 +475,7 @@ class WampHttpResource(Resource):
                 factory,
                 serializers = None,
                 timeout = 10,
-                killAfter = 30,
+                killAfter = 5,
                 queueLimitBytes = 128 * 1024,
                 queueLimitMessages = 100,
                 debug = False,
